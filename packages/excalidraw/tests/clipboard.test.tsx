@@ -7,7 +7,8 @@ import { KEYS, arrayToMap, getLineHeight } from "@excalidraw/common";
 
 import { getElementBounds } from "@excalidraw/element";
 
-import { createPasteEvent, serializeAsClipboardJSON } from "../clipboard";
+import * as clipboard from "../clipboard";
+import { actionCut } from "../actions/actionClipboard";
 
 import { Excalidraw } from "../index";
 
@@ -15,6 +16,7 @@ import { API } from "./helpers/api";
 import { mockMermaidToExcalidraw } from "./helpers/mocks";
 import { Pointer, Keyboard } from "./helpers/ui";
 import {
+  act,
   render,
   waitFor,
   GlobalTestState,
@@ -24,6 +26,7 @@ import {
 import type { NormalizedZoomValue } from "../types";
 
 const { h } = window;
+const { createPasteEvent, serializeAsClipboardJSON } = clipboard;
 
 const mouse = new Pointer("mouse");
 
@@ -90,6 +93,75 @@ beforeEach(async () => {
   );
   Object.assign(document, {
     elementFromPoint: () => GlobalTestState.canvas,
+  });
+});
+
+describe("cut action", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("keeps the selection and shows an error when copying fails", async () => {
+    const rectangle = API.createElement({ type: "rectangle" });
+    API.setElements([rectangle]);
+    API.setSelectedElements([rectangle]);
+    vi.spyOn(clipboard, "copyToClipboard").mockRejectedValue(
+      new Error("Clipboard blocked"),
+    );
+
+    await act(async () => {
+      h.app.actionManager.executeAction(actionCut);
+    });
+
+    expect(h.elements[0].isDeleted).toBe(false);
+    expect(h.state.selectedElementIds[rectangle.id]).toBe(true);
+    expect(h.state.errorMessage).toBe("Clipboard blocked");
+  });
+
+  it("deletes only the selected elements after copying succeeds", async () => {
+    const rectangle = API.createElement({ type: "rectangle" });
+    const ellipse = API.createElement({ type: "ellipse" });
+    API.setElements([rectangle, ellipse]);
+    API.setSelectedElements([rectangle]);
+    const copy = vi
+      .spyOn(clipboard, "copyToClipboard")
+      .mockResolvedValue(undefined);
+
+    await act(async () => {
+      h.app.actionManager.executeAction(actionCut);
+    });
+
+    expect(copy).toHaveBeenCalledWith([rectangle], h.app.files, null);
+    expect(h.elements[0].isDeleted).toBe(true);
+    expect(h.elements[1].isDeleted).toBe(false);
+  });
+
+  it("keeps elements until the pending clipboard write completes", async () => {
+    const rectangle = API.createElement({ type: "rectangle" });
+    API.setElements([rectangle]);
+    API.setSelectedElements([rectangle]);
+    let finishCopy!: () => void;
+    const pendingCopy = new Promise<void>((resolve) => {
+      finishCopy = resolve;
+    });
+    const copy = vi
+      .spyOn(clipboard, "copyToClipboard")
+      .mockReturnValue(pendingCopy);
+
+    act(() => {
+      h.app.actionManager.executeAction(actionCut);
+    });
+
+    expect(copy).toHaveBeenCalledTimes(1);
+    expect(h.elements[0].isDeleted).toBe(false);
+    expect(h.state.selectedElementIds[rectangle.id]).toBe(true);
+
+    await act(async () => {
+      finishCopy();
+      await pendingCopy;
+    });
+
+    expect(h.elements[0].isDeleted).toBe(true);
   });
 });
 
